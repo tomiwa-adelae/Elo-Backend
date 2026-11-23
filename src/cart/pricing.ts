@@ -1,4 +1,5 @@
 import type { Discount } from '../../generated/prisma/client';
+import { formatMoney, fromKobo, type Currency } from '../money/money';
 
 export interface PricedLine {
   variantId: string;
@@ -37,15 +38,18 @@ export function computeDiscount(
   subtotalKobo: number,
   /** Collections each product belongs to, for scoped codes. */
   collectionsByProduct: Map<string, string[]>,
+  /** Currency the lines are priced in; naira-authored limits are converted. */
+  currency: Currency = 'NGN',
+  ngnPerUsd = 1,
 ): DiscountOutcome {
-  if (
-    discount.minSubtotalKobo !== null &&
-    subtotalKobo < discount.minSubtotalKobo
-  ) {
+  const minSubtotal = fromKobo(discount.minSubtotalKobo, currency, ngnPerUsd);
+  const maxDiscount = fromKobo(discount.maxDiscountKobo, currency, ngnPerUsd);
+
+  if (minSubtotal !== null && subtotalKobo < minSubtotal) {
     return {
       discountKobo: 0,
       freeDelivery: false,
-      reason: `Spend at least ${formatKobo(discount.minSubtotalKobo)} to use this code`,
+      reason: `Spend at least ${formatMoney(minSubtotal, currency)} to use this code`,
     };
   }
 
@@ -68,13 +72,10 @@ export function computeDiscount(
   let discountKobo =
     discount.type === 'PERCENTAGE'
       ? Math.floor((eligibleTotal * discount.value) / 100)
-      : discount.value;
+      : fromKobo(discount.value, currency, ngnPerUsd);
 
-  if (
-    discount.maxDiscountKobo !== null &&
-    discountKobo > discount.maxDiscountKobo
-  ) {
-    discountKobo = discount.maxDiscountKobo;
+  if (maxDiscount !== null && discountKobo > maxDiscount) {
+    discountKobo = maxDiscount;
   }
 
   // A fixed-amount code larger than the basket must not produce a negative
@@ -104,9 +105,7 @@ function scopeLines(
   });
 }
 
+/** Naira formatting for amounts that are always kobo. */
 export function formatKobo(kobo: number): string {
-  return `₦${(kobo / 100).toLocaleString('en-NG', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+  return formatMoney(kobo, 'NGN');
 }

@@ -9,7 +9,9 @@ const PAYSTACK_BASE_URL = 'https://api.paystack.co';
 
 export interface InitializeTransactionArgs {
   email: string;
+  /** Minor units of `currency` (kobo or cents). */
   amountKobo: number;
+  currency: 'NGN' | 'USD';
   reference: string;
   callbackUrl: string;
   metadata?: Record<string, unknown>;
@@ -55,8 +57,9 @@ export class PaystackService {
   /**
    * Creates a pending transaction and returns the hosted checkout URL.
    *
-   * Paystack works in kobo, which is also how amounts are stored, so no
-   * conversion happens anywhere in this flow.
+   * Paystack works in minor units (kobo, cents), which is also how amounts
+   * are stored, so no conversion happens anywhere in this flow. USD needs to
+   * be enabled on the Paystack account.
    */
   async initializeTransaction(
     args: InitializeTransactionArgs,
@@ -72,6 +75,7 @@ export class PaystackService {
         body: JSON.stringify({
           email: args.email,
           amount: args.amountKobo,
+          currency: args.currency,
           reference: args.reference,
           callback_url: args.callbackUrl,
           metadata: args.metadata,
@@ -90,7 +94,9 @@ export class PaystackService {
         `Paystack initialize failed (${response.status}): ${body?.message}`,
       );
       throw new InternalServerErrorException(
-        'Could not start payment. Please try again.',
+        /currency/i.test(body?.message ?? '')
+          ? 'Dollar payments are not available right now. Please switch to naira or message us on WhatsApp.'
+          : 'Could not start payment. Please try again.',
       );
     }
 

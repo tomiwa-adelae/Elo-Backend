@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { formatKobo } from '../cart/pricing';
+import { formatMoney, type Currency } from '../money/money';
 
 const ORDER_DETAIL_INCLUDE = {
   items: true,
@@ -22,6 +22,7 @@ const ORDER_DETAIL_INCLUDE = {
       status: true,
       reference: true,
       amountKobo: true,
+      currency: true,
       channel: true,
       paidAt: true,
     },
@@ -54,6 +55,7 @@ export class OrdersService {
           status: true,
           paymentStatus: true,
           totalKobo: true,
+          currency: true,
           placedAt: true,
           items: {
             select: {
@@ -71,7 +73,7 @@ export class OrdersService {
       items: orders.map((order) => ({
         ...order,
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
-        formattedTotal: formatKobo(order.totalKobo),
+        formattedTotal: formatMoney(order.totalKobo, order.currency),
       })),
       pagination: {
         page,
@@ -121,15 +123,17 @@ export class OrdersService {
       discountKobo: number;
       deliveryKobo: number;
       totalKobo: number;
+      currency: Currency;
     },
   >(order: T) {
+    const money = (minor: number) => formatMoney(minor, order.currency);
     return {
       ...order,
       formatted: {
-        subtotal: formatKobo(order.subtotalKobo),
-        discount: formatKobo(order.discountKobo),
-        delivery: formatKobo(order.deliveryKobo),
-        total: formatKobo(order.totalKobo),
+        subtotal: money(order.subtotalKobo),
+        discount: money(order.discountKobo),
+        delivery: money(order.deliveryKobo),
+        total: money(order.totalKobo),
       },
     };
   }

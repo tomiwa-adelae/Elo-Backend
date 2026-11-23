@@ -6,7 +6,9 @@ import {
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { AvailabilityService } from '../inventory/availability.service';
-import { computeDiscount, formatKobo, type PricedLine } from './pricing';
+import { computeDiscount, type PricedLine } from './pricing';
+import { SettingsService } from '../settings/settings.service';
+import { formatMoney, variantPrice, type Currency } from '../money/money';
 
 export interface CartOwner {
   userId?: string;
@@ -18,7 +20,14 @@ export class CartService {
   constructor(
     private prisma: PrismaService,
     private availability: AvailabilityService,
+    private settings: SettingsService,
   ) {}
+
+  /** The currency a cart should actually be priced in right now. */
+  async effectiveCurrency(wanted: Currency): Promise<Currency> {
+    const store = await this.settings.get();
+    return wanted === 'USD' && store.enableUsd ? 'USD' : 'NGN';
+  }
 
   // ── resolution ───────────────────────────────────────────────────────────
 
@@ -28,7 +37,21 @@ export class CartService {
    * Signed-in shoppers are keyed by userId so their bag follows them across
    * devices; guests are keyed by an opaque session token in a cookie.
    */
-  async getOrCreateCart(owner: CartOwner) {
+  async getOrCreateCart(owner: CartOwner, currency?: Currency) {
+    const cart = await this.findOrCreateCart(owner, currency);
+
+    // The shopper switched currency since the bag was created.
+    if (currency && cart.currency !== currency) {
+      return this.prisma.cart.update({
+        where: { id: cart.id },
+        data: { currency },
+      });
+    }
+
+    return cart;
+  }
+
+  private async findOrCreateCart(owner: CartOwner, currency?: Currency) {
     if (owner.userId) {
       const existing = await this.prisma.cart.findFirst({
         where: { userId: owner.userId, status: 'ACTIVE' },
@@ -38,22 +61,30 @@ export class CartService {
       if (existing) return existing;
 
       return this.prisma.cart.create({
-        data: { userId: owner.userId, status: 'ACTIVE' },
+        data: { userId: owner.userId, status: 'ACTIVE', currency },
       });
     }
 
-    if (owner.sessionToken) {
-      const existing = await this.prisma.cart.findFirst({
-        where: { sessionToken: owner.sessionToken, status: 'ACTIVE' },
+    let sessionToken = owner.sessionToken;
+
+    if (sessionToken) {
+      const existing = await this.prisma.cart.findUnique({
+        where: { sessionToken },
       });
 
-      if (existing) return existing;
+      if (existing?.status === 'ACTIVE') return existing;
+
+      // The token still belongs to a cart that was checked out (or
+      // abandoned). sessionToken is unique, so reusing it would fail;
+      // issue a fresh one and the controller resets the cookie.
+      if (existing) sessionToken = undefined;
     }
 
     return this.prisma.cart.create({
       data: {
-        sessionToken: owner.sessionToken ?? randomUUID(),
+        sessionToken: sessionToken ?? randomUUID(),
         status: 'ACTIVE',
+        currency,
       },
     });
   }
@@ -315,6 +346,24 @@ export class CartService {
    * Prices come from the live variant, never from what was stored when the
    * item was added — a cart is a wish list until checkout snapshots it.
    */
+  /** The variant's own photo, else the first photo of its colour, else the cover. */
+  private lineImage(variant: {
+    image: string | null;
+    product: { images: { url: string; colour: string | null }[] };
+    optionValues: { value: string; option: { name: string } }[];
+  }) {
+    if (variant.image) return variant.image;
+    const colour = variant.optionValues.find((ov) =>
+      /colou?r/i.test(ov.option.name),
+    )?.value;
+    const images = variant.product.images;
+    return (
+      (colour && images.find((i) => i.colour === colour)?.url) ??
+      images[0]?.url ??
+      null
+    );
+  }
+
   async getCartView(cartId: string) {
     const cart = await this.prisma.cart.findUnique({
       where: { id: cartId },
@@ -332,8 +381,7 @@ export class CartService {
                     slug: true,
                     images: {
                       orderBy: { position: 'asc' },
-                      take: 1,
-                      select: { url: true, alt: true },
+                      select: { url: true, alt: true, colour: true },
                     },
                     collections: { select: { collectionId: true } },
                   },
@@ -353,6 +401,10 @@ export class CartService {
 
     if (!cart) throw new NotFoundException('Cart not found');
 
+    const store = await this.settings.get();
+    const currency = await this.effectiveCurrency(cart.currency);
+    const rate = store.ngnPerUsd;
+
     const availability = await this.availability.resolve(
       cart.items.map((item) => item.variant),
     );
@@ -369,14 +421,15 @@ export class CartService {
       const purchasable = backorder
         ? item.quantity
         : Math.min(item.quantity, available);
-      const totalKobo = item.variant.priceKobo * purchasable;
+      const unit = variantPrice(item.variant, currency, rate);
+      const totalKobo = unit.price * purchasable;
 
       if (purchasable > 0) {
         lines.push({
           variantId: item.variantId,
           productId: item.variant.product.id,
           quantity: purchasable,
-          unitPriceKobo: item.variant.priceKobo,
+          unitPriceKobo: unit.price,
           totalKobo,
         });
       }
@@ -389,14 +442,14 @@ export class CartService {
           id: item.variant.product.id,
           title: item.variant.product.title,
           slug: item.variant.product.slug,
-          image: item.variant.product.images[0]?.url ?? item.variant.image,
+          image: this.lineImage(item.variant),
         },
         sku: item.variant.sku,
         options: Object.fromEntries(
           item.variant.optionValues.map((ov) => [ov.option.name, ov.value]),
         ),
-        unitPriceKobo: item.variant.priceKobo,
-        compareAtPriceKobo: item.variant.compareAtPriceKobo,
+        unitPriceKobo: unit.price,
+        compareAtPriceKobo: unit.compareAt,
         totalKobo,
         available,
         inStock: backorder || available > 0,
@@ -422,11 +475,18 @@ export class CartService {
           lines,
           subtotalKobo,
           collectionsByProduct,
+          currency,
+          rate,
         )
       : { discountKobo: 0, freeDelivery: false };
 
+    const total = Math.max(0, subtotalKobo - discountOutcome.discountKobo);
+
     return {
       id: cart.id,
+      // Every *Kobo amount below is in the minor unit of this currency.
+      currency,
+      ngnPerUsd: rate,
       items,
       itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
       discount: cart.discount
@@ -442,13 +502,11 @@ export class CartService {
         discountKobo: discountOutcome.discountKobo,
         // Delivery is unknown until an address exists, so the cart total
         // deliberately excludes it. Checkout adds it.
-        totalKobo: Math.max(0, subtotalKobo - discountOutcome.discountKobo),
+        totalKobo: total,
         formatted: {
-          subtotal: formatKobo(subtotalKobo),
-          discount: formatKobo(discountOutcome.discountKobo),
-          total: formatKobo(
-            Math.max(0, subtotalKobo - discountOutcome.discountKobo),
-          ),
+          subtotal: formatMoney(subtotalKobo, currency),
+          discount: formatMoney(discountOutcome.discountKobo, currency),
+          total: formatMoney(total, currency),
         },
       },
       hasUnavailableItems: items.some((item) => item.quantityAdjusted),

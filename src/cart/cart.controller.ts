@@ -23,6 +23,8 @@ import { Public } from '../decorators/public.decorator';
 import type { AppRequest } from '../types/request';
 
 const CART_COOKIE = 'cartSession';
+// Set by the storefront's currency switcher (and its first-visit geo default).
+const CURRENCY_COOKIE = 'currency';
 const CART_COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 
 /**
@@ -44,7 +46,13 @@ export class CartController {
     const userId = req.user?.id;
     const sessionToken = req.cookies?.[CART_COOKIE];
 
-    const cart = await this.cart.getOrCreateCart({ userId, sessionToken });
+    const wanted = req.cookies?.[CURRENCY_COOKIE];
+    const currency = wanted === 'USD' || wanted === 'NGN' ? wanted : undefined;
+
+    const cart = await this.cart.getOrCreateCart(
+      { userId, sessionToken },
+      currency,
+    );
 
     if (!userId && cart.sessionToken && cart.sessionToken !== sessionToken) {
       const isProd = process.env.NODE_ENV === 'production';
@@ -78,7 +86,9 @@ export class CartController {
     @Body() dto: AddCartItemDto,
   ) {
     const cart = await this.resolveCart(req, res);
-    return this.cart.addItem(cart.id, dto.variantId, dto.quantity);
+    await this.cart.addItem(cart.id, dto.variantId, dto.quantity);
+    // The whole priced bag, so the client needn't re-fetch.
+    return this.cart.getCartView(cart.id);
   }
 
   @Patch('items/:itemId')
@@ -90,7 +100,9 @@ export class CartController {
     @Body() dto: UpdateCartItemDto,
   ) {
     const cart = await this.resolveCart(req, res);
-    return this.cart.updateItem(cart.id, itemId, dto.quantity);
+    await this.cart.updateItem(cart.id, itemId, dto.quantity);
+    // The whole priced bag, so the client needn't re-fetch.
+    return this.cart.getCartView(cart.id);
   }
 
   @Delete('items/:itemId')
@@ -101,7 +113,9 @@ export class CartController {
     @Param('itemId') itemId: string,
   ) {
     const cart = await this.resolveCart(req, res);
-    return this.cart.removeItem(cart.id, itemId);
+    await this.cart.removeItem(cart.id, itemId);
+    // The whole priced bag, so the client needn't re-fetch.
+    return this.cart.getCartView(cart.id);
   }
 
   @Delete()

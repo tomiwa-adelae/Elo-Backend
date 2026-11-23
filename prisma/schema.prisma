@@ -1,12 +1,17 @@
-// Single-vendor apparel storefront.
+// ELO storefront.
 //
-// Money is stored as integer KOBO everywhere (NGN * 100). Never use Float or
-// Decimal for money — kobo keeps arithmetic exact and matches what Paystack
-// sends and expects on the wire.
+// Money is stored as integer minor units, never Float or Decimal.
+//
+// Catalogue prices, delivery fees and discount thresholds are authored in
+// KOBO (NGN * 100), with optional explicit USD overrides in CENTS. Anything
+// attached to an order (Order, OrderItem, Payment, Refund, redemptions) is in
+// the minor unit of that order's `currency` — kobo for NGN, cents for USD —
+// despite the historical "Kobo" suffix. Order.totalNgnKobo is the naira
+// equivalent snapshotted at purchase, used for reporting across currencies.
 
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
   // NestJS compiles to CommonJS. Without this the generator emits ESM that
   // uses import.meta.url, which cannot be require()d from dist/.
   moduleFormat = "cjs"
@@ -15,6 +20,72 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Store settings
+// ---------------------------------------------------------------------------
+
+// One row per deployment. Everything that changes from client to client —
+// name, logo, colours, contact lines, policies — lives here so rebranding the
+// store is an admin task, not a code change.
+enum Currency {
+  NGN
+  USD
+}
+
+model StoreSettings {
+  id String @id @default("store")
+
+  name       String  @default("My Store")
+  tagline    String?
+  logoUrl    String?
+  // Shown in the browser tab and on social shares.
+  faviconUrl String?
+  ogImageUrl String?
+
+  // Design tokens consumed by the storefront as CSS variables.
+  // Shape: { primary, primaryForeground, background, foreground, muted,
+  //          accent, fontHeading, fontBody, radius }
+  theme Json @default("{}")
+
+  announcement String?
+
+  heroEyebrow  String?
+  heroTitle    String?
+  heroSubtitle String?
+  heroImageUrl String?
+  heroCtaLabel String?
+  heroCtaHref  String?
+
+  contactEmail   String?
+  contactPhone   String?
+  // International format without "+", e.g. 2348012345678 — used for wa.me links.
+  whatsappNumber String?
+  address        String?
+
+  instagram String?
+  tiktok    String?
+  facebook  String?
+  twitter   String?
+
+  // Global switch layered on top of DeliveryZone.allowPayOnDelivery.
+  enablePayOnDelivery Boolean @default(true)
+
+  // Dollar checkout. Prices without an explicit USD amount are converted at
+  // this rate (whole naira per US dollar) and rounded up to the dollar.
+  enableUsd Boolean @default(true)
+  ngnPerUsd Int     @default(1500)
+
+  shippingPolicy String?
+  returnsPolicy  String?
+  privacyPolicy  String?
+  termsOfService String?
+
+  metaTitle       String?
+  metaDescription String?
+
+  updatedAt DateTime @updatedAt
 }
 
 // ---------------------------------------------------------------------------
@@ -171,8 +242,12 @@ model Product {
 
   // Denormalised from variants so listing pages can sort and filter on price
   // without joining. Recompute whenever a variant price changes.
-  minPriceKobo Int @default(0)
-  maxPriceKobo Int @default(0)
+  minPriceKobo     Int @default(0)
+  maxPriceKobo     Int @default(0)
+  // Effective dollar range (explicit or converted), kept in sync on save and
+  // whenever the exchange rate changes.
+  minPriceUsdCents Int @default(0)
+  maxPriceUsdCents Int @default(0)
 
   // Apparel merchandising
   brand     String?
@@ -245,6 +320,10 @@ model ProductVariant {
   // What the unit actually costs you. Admin-only; drives margin reporting.
   costKobo           Int?
 
+  // Explicit dollar prices in cents. Null means "convert from naira".
+  priceUsdCents     Int?
+  compareAtUsdCents Int?
+
   stock          Int     @default(0)
   // Allow selling past zero (pre-orders). Off by default.
   allowBackorder Boolean @default(false)
@@ -260,14 +339,30 @@ model ProductVariant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  product      Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
-  optionValues ProductOptionValue[]   @relation("VariantOptionValues")
-  cartItems    CartItem[]
-  orderItems   OrderItem[]
-  reservations InventoryReservation[]
-  movements    InventoryMovement[]
+  product       Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
+  optionValues  ProductOptionValue[]   @relation("VariantOptionValues")
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  reservations  InventoryReservation[]
+  movements     InventoryMovement[]
+  restockAlerts RestockAlert[]
 
   @@index([productId])
+}
+
+// "Email me when it's back": one row per shopper per sold-out variant.
+// notifiedAt is set once the back-in-stock email goes out.
+model RestockAlert {
+  id         String    @id @default(uuid())
+  variantId  String
+  email      String
+  createdAt  DateTime  @default(now())
+  notifiedAt DateTime?
+
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([variantId, email])
+  @@index([notifiedAt])
 }
 
 model ProductImage {
@@ -276,6 +371,9 @@ model ProductImage {
   url       String
   alt       String?
   position  Int     @default(0)
+  // The colour value this photo shows (matches a "Colour" option value), so
+  // picking Lime swaps the gallery to the lime photos. Null = every colour.
+  colour    String?
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
@@ -358,6 +456,8 @@ model Cart {
 
   sessionToken String? @unique
 
+  currency Currency @default(NGN)
+
   status CartStatus @default(ACTIVE)
 
   discountId String?
@@ -421,6 +521,8 @@ model Address {
   city        String
   state       String
   country     String  @default("Nigeria")
+  // ISO 3166-1 alpha-2. Drives delivery-zone matching.
+  countryCode String  @default("NG")
   postalCode  String?
   // Free-text landmark. Formal addressing is unreliable in much of Nigeria and
   // dispatch riders rely on this more than the street line.
@@ -436,20 +538,31 @@ model Address {
   @@index([userId])
 }
 
-// Delivery pricing by area. Flat-rate shipping does not survive contact with
-// Nigerian logistics — Lekki and Kano are not the same delivery.
+// Delivery pricing by area.
+//
+// Inside Nigeria zones match on state (and optionally city). Outside Nigeria
+// they match on country code; a zone whose countries include "*" catches
+// every country not listed elsewhere.
 model DeliveryZone {
-  id     String   @id @default(uuid())
-  name   String
-  // States this zone covers, matched against Address.state.
-  states String[] @default([])
+  id        String   @id @default(uuid())
+  name      String
+  // ISO 3166-1 alpha-2 codes, or "*" for the rest of the world.
+  countries String[] @default(["NG"])
+  // Nigerian states this zone covers, matched against Address.state.
+  states    String[] @default([])
   // Optional narrowing to specific cities within those states.
-  cities String[] @default([])
+  cities    String[] @default([])
 
   feeKobo Int
 
   // Free delivery above this subtotal. Null disables the perk.
   freeAboveKobo Int?
+
+  // Explicit dollar amounts. Null means "convert from naira".
+  feeUsdCents       Int?
+  freeAboveUsdCents Int?
+
+  position Int @default(0)
 
   estimatedMinDays Int @default(1)
   estimatedMaxDays Int @default(5)
@@ -489,7 +602,10 @@ model Order {
   deliveryKobo Int @default(0)
   totalKobo    Int
 
-  currency String @default("NGN")
+  currency     Currency @default(NGN)
+  // Naira equivalent of totalKobo at the rate used, for cross-currency reports.
+  totalNgnKobo Int
+  ngnPerUsd    Int?
 
   discountId   String?
   discountCode String?
@@ -611,6 +727,7 @@ model Payment {
   reference String @unique
 
   amountKobo Int
+  currency   Currency        @default(NGN)
   status     PaymentTxStatus @default(PENDING)
 
   authorizationUrl String?
@@ -957,4 +1074,15 @@ model BackInStockAlert {
 
   @@unique([variantId, email])
   @@index([variantId, notifiedAt])
+}
+
+// Newsletter ("Join the Softies").
+model Subscriber {
+  id    String @id @default(uuid())
+  email String @unique
+
+  source String?
+
+  unsubscribedAt DateTime?
+  createdAt      DateTime  @default(now())
 }

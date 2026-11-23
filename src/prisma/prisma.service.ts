@@ -1,5 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaNeon } from '@prisma/adapter-neon';
+import { PrismaPg } from '@prisma/adapter-pg';
 import { neonConfig } from '@neondatabase/serverless';
 import ws from 'ws';
 import { Prisma, PrismaClient } from '../../generated/prisma/client';
@@ -17,7 +18,12 @@ function createAdapter() {
     );
   }
 
-  return new PrismaNeon({ connectionString });
+  // Neon in production (serverless driver over WebSockets); a plain Postgres
+  // connection for local development against Docker.
+  if (/\.neon\.tech/.test(connectionString)) {
+    return new PrismaNeon({ connectionString });
+  }
+  return new PrismaPg({ connectionString });
 }
 
 /**

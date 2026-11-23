@@ -1,8 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import Mailjet from 'node-mailjet';
 import {
+  brand,
   forgotPasswordEmail,
+  newOrderAdminEmail,
+  orderCancelledEmail,
+  orderConfirmedEmail,
+  orderDeliveredEmail,
+  orderShippedEmail,
+  type OrderEmailData,
   passwordChangedEmail,
+  subscriberWelcomeEmail,
+  backInStockEmail,
   verifyEmail,
   welcomeEmail,
 } from './templates';
@@ -48,7 +57,7 @@ export class MailService {
           {
             From: {
               Email: process.env.SENDER_EMAIL_ADDRESS,
-              Name: process.env.STORE_NAME ?? 'The Store',
+              Name: brand.name,
             },
             To: [{ Email: to, Name: toName ?? to }],
             Subject: subject,
@@ -83,5 +92,56 @@ export class MailService {
   async sendPasswordChanged(to: string) {
     const { subject, html } = passwordChangedEmail();
     await this.send({ to, subject, html });
+  }
+
+  async sendBackInStock(
+    to: string,
+    data: Parameters<typeof backInStockEmail>[0],
+  ) {
+    const { subject, html } = backInStockEmail(data);
+    await this.send({ to, subject, html });
+  }
+
+  async sendSubscriberWelcome(to: string) {
+    const { subject, html } = subscriberWelcomeEmail();
+    await this.send({ to, subject, html });
+  }
+
+  // ── orders ────────────────────────────────────────────────────────────────
+
+  async sendOrderConfirmed(order: OrderEmailData, payOnDelivery: boolean) {
+    const { subject, html } = orderConfirmedEmail(order, payOnDelivery);
+    await this.send({ to: order.email, subject, html });
+
+    const admin = process.env.ADMIN_EMAIL_ADDRESS;
+    if (admin) {
+      const alert = newOrderAdminEmail(
+        order,
+        payOnDelivery ? 'pay on delivery' : 'paid online',
+      );
+      await this.send({ to: admin, subject: alert.subject, html: alert.html });
+    }
+  }
+
+  async sendOrderShipped(
+    order: OrderEmailData,
+    tracking?: {
+      carrier?: string | null;
+      trackingNumber?: string | null;
+      trackingUrl?: string | null;
+    },
+  ) {
+    const { subject, html } = orderShippedEmail(order, tracking);
+    await this.send({ to: order.email, subject, html });
+  }
+
+  async sendOrderDelivered(order: OrderEmailData) {
+    const { subject, html } = orderDeliveredEmail(order);
+    await this.send({ to: order.email, subject, html });
+  }
+
+  async sendOrderCancelled(order: OrderEmailData, reason?: string | null) {
+    const { subject, html } = orderCancelledEmail(order, reason);
+    await this.send({ to: order.email, subject, html });
   }
 }

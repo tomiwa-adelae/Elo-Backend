@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ReservationService } from '../inventory/reservation.service';
 import { MailService } from '../mail/mail.service';
 import { PaystackService, type PaystackChargeData } from './paystack.service';
-import { formatKobo } from '../cart/pricing';
+import { formatMoney } from '../money/money';
 import type { Prisma } from '../../generated/prisma/client';
 
 /**
@@ -55,16 +55,20 @@ export class PaymentsService {
 
     // Amount tampering: the hosted page is Paystack's, but the callback is
     // ours, so verify what was actually paid.
-    if (charge.amount !== payment.amountKobo) {
+    const currencyMismatch =
+      charge.currency !== undefined &&
+      charge.currency.toUpperCase() !== payment.currency;
+
+    if (charge.amount !== payment.amountKobo || currencyMismatch) {
       this.logger.error(
-        `Amount mismatch for ${charge.reference}: expected ${payment.amountKobo}, got ${charge.amount}`,
+        `Amount mismatch for ${charge.reference}: expected ${payment.amountKobo} ${payment.currency}, got ${charge.amount} ${charge.currency}`,
       );
       await this.prisma.payment.update({
         where: { id: payment.id },
         data: {
           status: 'FAILED',
           failedAt: new Date(),
-          failureReason: `Amount mismatch: expected ${payment.amountKobo}, received ${charge.amount}`,
+          failureReason: `Amount mismatch: expected ${payment.amountKobo} ${payment.currency}, received ${charge.amount} ${charge.currency ?? ''}`.trim(),
           rawPayload: toJson(charge),
         },
       });
@@ -103,7 +107,7 @@ export class PaymentsService {
         data: {
           orderId: payment.orderId,
           type: 'PAYMENT_CONFIRMED',
-          message: `Payment of ${formatKobo(payment.amountKobo)} confirmed via ${charge.channel ?? 'Paystack'}`,
+          message: `Payment of ${formatMoney(payment.amountKobo, payment.currency)} confirmed via ${charge.channel ?? 'Paystack'}`,
           data: { reference: charge.reference },
         },
       });
@@ -194,19 +198,28 @@ export class PaymentsService {
       select: {
         orderNumber: true,
         email: true,
-        totalKobo: true,
         userId: true,
+        subtotalKobo: true,
+        discountKobo: true,
+        deliveryKobo: true,
+        totalKobo: true,
+        currency: true,
+        shippingAddress: true,
+        items: {
+          select: {
+            productTitle: true,
+            variantTitle: true,
+            quantity: true,
+            totalKobo: true,
+            image: true,
+          },
+        },
       },
     });
 
     if (!order) return;
 
-    await this.mail.send({
-      to: order.email,
-      subject: `Order ${order.orderNumber} confirmed`,
-      html: `<p>Thanks — we've received your payment of ${formatKobo(order.totalKobo)} and your order is confirmed.</p>
-             <p>Your order number is <strong>${order.orderNumber}</strong>.</p>`,
-    });
+    await this.mail.sendOrderConfirmed(order, false);
 
     if (order.userId) {
       await this.prisma.notification.create({

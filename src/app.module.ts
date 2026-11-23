@@ -7,6 +7,9 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
 import { MailModule } from './mail/mail.module';
+import { SettingsModule } from './settings/settings.module';
+import { AdminModule } from './admin/admin.module';
+import { StorageModule } from './storage/storage.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { DeliveryModule } from './delivery/delivery.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -15,6 +18,8 @@ import { CatalogModule } from './catalog/catalog.module';
 import { CartModule } from './cart/cart.module';
 import { CheckoutModule } from './checkout/checkout.module';
 import { OrdersModule } from './orders/orders.module';
+import { NewsletterModule } from './newsletter/newsletter.module';
+import { RestockModule } from './restock/restock.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
 
@@ -25,6 +30,8 @@ import { RolesGuard } from './auth/guards/roles.guard';
     ScheduleModule.forRoot(),
     PrismaModule,
     MailModule,
+    SettingsModule,
+    StorageModule,
     InventoryModule,
     DeliveryModule,
     PaymentsModule,
@@ -33,6 +40,9 @@ import { RolesGuard } from './auth/guards/roles.guard';
     CartModule,
     CheckoutModule,
     OrdersModule,
+    NewsletterModule,
+    RestockModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [

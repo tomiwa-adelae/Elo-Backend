@@ -13,7 +13,7 @@ import {
 } from '../inventory/reservation.service';
 import { PaystackService } from '../payments/paystack.service';
 import { MailService } from '../mail/mail.service';
-import { formatKobo } from '../cart/pricing';
+import { formatMoney, usdCentsToKobo } from '../money/money';
 import { getFrontendUrl } from '../utils/frontendUrl';
 import { generateOrderNumber, generatePaymentReference } from './order-number';
 import {
@@ -21,6 +21,7 @@ import {
   type PlaceOrderDto,
   type ShippingAddressDto,
 } from './dto/checkout.dto';
+import { SettingsService } from '../settings/settings.service';
 
 @Injectable()
 export class CheckoutService {
@@ -33,6 +34,7 @@ export class CheckoutService {
     private reservations: ReservationService,
     private paystack: PaystackService,
     private mail: MailService,
+    private settings: SettingsService,
   ) {}
 
   /**
@@ -47,18 +49,19 @@ export class CheckoutService {
     }
 
     const { subtotalKobo, discountKobo } = cart.totals;
+    const currency = cart.currency;
 
-    const zone = await this.delivery.resolve(
-      address.state,
-      address.city,
-      subtotalKobo,
-    );
+    const store = await this.settings.get();
+
+    const zone = await this.delivery.resolve(address, subtotalKobo, currency);
 
     // A FREE_SHIPPING code zeroes delivery instead of the subtotal.
     const deliveryKobo = cart.discount?.freeDelivery ? 0 : zone.feeKobo;
     const totalKobo = Math.max(0, subtotalKobo - discountKobo + deliveryKobo);
 
     return {
+      currency,
+      ngnPerUsd: cart.ngnPerUsd,
       delivery: {
         zoneName: zone.zoneName,
         feeKobo: deliveryKobo,
@@ -66,7 +69,8 @@ export class CheckoutService {
         freeAboveKobo: zone.freeAboveKobo,
         estimatedMinDays: zone.estimatedMinDays,
         estimatedMaxDays: zone.estimatedMaxDays,
-        allowPayOnDelivery: zone.allowPayOnDelivery,
+        allowPayOnDelivery:
+          zone.allowPayOnDelivery && store.enablePayOnDelivery,
       },
       totals: {
         subtotalKobo,
@@ -74,10 +78,10 @@ export class CheckoutService {
         deliveryKobo,
         totalKobo,
         formatted: {
-          subtotal: formatKobo(subtotalKobo),
-          discount: formatKobo(discountKobo),
-          delivery: formatKobo(deliveryKobo),
-          total: formatKobo(totalKobo),
+          subtotal: formatMoney(subtotalKobo, currency),
+          discount: formatMoney(discountKobo, currency),
+          delivery: formatMoney(deliveryKobo, currency),
+          total: formatMoney(totalKobo, currency),
         },
       },
       hasUnavailableItems: cart.hasUnavailableItems,
@@ -130,6 +134,10 @@ export class CheckoutService {
       select: { discountId: true },
     });
 
+    const currency = quote.currency;
+    const isUsd = currency === 'USD';
+    const money = (minor: number) => formatMoney(minor, currency);
+
     const result = await this.prisma.$transaction(async (tx) => {
       const orderNumber = await this.allocateOrderNumber(tx);
 
@@ -146,10 +154,18 @@ export class CheckoutService {
           discountKobo: quote.totals.discountKobo,
           deliveryKobo: quote.totals.deliveryKobo,
           totalKobo: quote.totals.totalKobo,
+          currency,
+          totalNgnKobo: isUsd
+            ? usdCentsToKobo(quote.totals.totalKobo, quote.ngnPerUsd)
+            : quote.totals.totalKobo,
+          ngnPerUsd: isUsd ? quote.ngnPerUsd : null,
           discountId: cartRecord?.discountId ?? null,
           discountCode: cart.discount?.code ?? null,
           // Frozen copy — the customer may edit or delete the saved address.
-          shippingAddress: { ...dto.shippingAddress },
+          shippingAddress: {
+            ...dto.shippingAddress,
+            countryCode: dto.shippingAddress.countryCode ?? 'NG',
+          },
           customerNote: dto.customerNote,
           items: {
             create: purchasable.map((item) => ({
@@ -183,7 +199,7 @@ export class CheckoutService {
         data: {
           orderId: order.id,
           type: 'PLACED',
-          message: `Order placed for ${formatKobo(quote.totals.totalKobo)}`,
+          message: `Order placed for ${money(quote.totals.totalKobo)}`,
         },
       });
 
@@ -204,6 +220,7 @@ export class CheckoutService {
             method: 'PAY_ON_DELIVERY',
             reference: generatePaymentReference(orderNumber),
             amountKobo: quote.totals.totalKobo,
+            currency,
             status: 'PENDING',
           },
         });
@@ -219,6 +236,7 @@ export class CheckoutService {
             method: 'CARD',
             reference,
             amountKobo: quote.totals.totalKobo,
+            currency,
             status: 'PENDING',
           },
         });
@@ -251,6 +269,7 @@ export class CheckoutService {
         paymentMethod: CheckoutPaymentMethod.PAY_ON_DELIVERY,
         status: 'CONFIRMED',
         totalKobo: quote.totals.totalKobo,
+        currency,
         authorizationUrl: null,
       };
     }
@@ -259,6 +278,7 @@ export class CheckoutService {
     const transaction = await this.paystack.initializeTransaction({
       email,
       amountKobo: quote.totals.totalKobo,
+      currency,
       reference: result.reference!,
       callbackUrl: `${getFrontendUrl()}/checkout/callback`,
       metadata: {
@@ -277,6 +297,7 @@ export class CheckoutService {
       paymentMethod: CheckoutPaymentMethod.PAYSTACK,
       status: 'PENDING',
       totalKobo: quote.totals.totalKobo,
+      currency,
       reference: result.reference,
       authorizationUrl: transaction.authorizationUrl,
     };
@@ -330,20 +351,28 @@ export class CheckoutService {
       select: {
         orderNumber: true,
         email: true,
-        totalKobo: true,
         userId: true,
+        subtotalKobo: true,
+        discountKobo: true,
+        deliveryKobo: true,
+        totalKobo: true,
+        currency: true,
+        shippingAddress: true,
+        items: {
+          select: {
+            productTitle: true,
+            variantTitle: true,
+            quantity: true,
+            totalKobo: true,
+            image: true,
+          },
+        },
       },
     });
 
     if (!order) return;
 
-    await this.mail.send({
-      to: order.email,
-      subject: `Order ${order.orderNumber} received`,
-      html: `<p>We've received your order.</p>
-             <p>Order number: <strong>${order.orderNumber}</strong><br/>
-             Total due on delivery: <strong>${formatKobo(order.totalKobo)}</strong></p>`,
-    });
+    await this.mail.sendOrderConfirmed(order, true);
 
     if (order.userId) {
       await this.prisma.notification.create({

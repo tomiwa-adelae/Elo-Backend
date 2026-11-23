@@ -3,6 +3,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AvailabilityService } from '../inventory/availability.service';
 import { ProductQueryDto, ProductSort } from './dto/product-query.dto';
 import type { Prisma } from '../../generated/prisma/client';
+import { SettingsService } from '../settings/settings.service';
+import { variantPrice } from '../money/money';
 
 /**
  * Only ACTIVE, already-published, non-deleted products are visible on the
@@ -23,6 +25,7 @@ export class CatalogService {
   constructor(
     private prisma: PrismaService,
     private availability: AvailabilityService,
+    private settings: SettingsService,
   ) {}
 
   // ── listing ──────────────────────────────────────────────────────────────
@@ -42,7 +45,7 @@ export class CatalogService {
         skip: (page - 1) * limit,
         take: limit,
         include: {
-          images: { orderBy: { position: 'asc' }, take: 2 },
+          images: { orderBy: { position: 'asc' } },
           category: { select: { id: true, name: true, slug: true } },
           variants: {
             where: { isActive: true },
@@ -92,7 +95,18 @@ export class CatalogService {
         category: product.category,
         minPriceKobo: product.minPriceKobo,
         maxPriceKobo: product.maxPriceKobo,
-        images: product.images.map((i) => ({ url: i.url, alt: i.alt })),
+        minPriceUsdCents: product.minPriceUsdCents,
+        maxPriceUsdCents: product.maxPriceUsdCents,
+        images: product.images
+          .slice(0, 2)
+          .map((i) => ({ url: i.url, alt: i.alt })),
+        // First photo of each colour, so cards can preview a swatch.
+        colourImages: Object.fromEntries(
+          product.images
+            .filter((i): i is typeof i & { colour: string } => !!i.colour)
+            .reverse()
+            .map((i): [string, string] => [i.colour, i.url]),
+        ),
         tags: product.tags,
         inStock,
         onSale,
@@ -297,15 +311,20 @@ export class CatalogService {
     if (!product) throw new NotFoundException('Product not found');
 
     const availability = await this.availability.resolve(product.variants);
+    const { ngnPerUsd } = await this.settings.get();
 
     const variants = product.variants.map((variant) => {
       const stock = availability.get(variant.id);
+      const usd = variantPrice(variant, 'USD', ngnPerUsd);
 
       return {
         id: variant.id,
         sku: variant.sku,
         priceKobo: variant.priceKobo,
         compareAtPriceKobo: variant.compareAtPriceKobo,
+        // Effective dollar prices (explicit or converted).
+        priceUsdCents: usd.price,
+        compareAtUsdCents: usd.compareAt,
         image: variant.image,
         // The option combination this SKU represents, e.g. { Size: 'M',
         // Colour: 'Black' } — this is what the picker matches against.
@@ -332,12 +351,15 @@ export class CatalogService {
       tags: product.tags,
       minPriceKobo: product.minPriceKobo,
       maxPriceKobo: product.maxPriceKobo,
+      minPriceUsdCents: product.minPriceUsdCents,
+      maxPriceUsdCents: product.maxPriceUsdCents,
       category: product.category,
       collections: product.collections.map((c) => c.collection),
       images: product.images.map((i) => ({
         url: i.url,
         alt: i.alt,
         position: i.position,
+        colour: i.colour,
       })),
       options: product.options.map((option) => ({
         id: option.id,
@@ -392,6 +414,15 @@ export class CatalogService {
   // ── taxonomy ─────────────────────────────────────────────────────────────
 
   /** The full category tree, nested, for navigation menus. */
+  /** Categories that publish a size guide, for the standalone guide page. */
+  async listSizeGuides() {
+    const categories = await this.prisma.category.findMany({
+      orderBy: { position: 'asc' },
+      select: { name: true, slug: true, sizeGuide: true },
+    });
+    return categories.filter((c) => c.sizeGuide !== null);
+  }
+
   async getCategoryTree() {
     const categories = await this.prisma.category.findMany({
       orderBy: { position: 'asc' },

@@ -39,6 +39,12 @@ export class CatalogController {
     return this.catalog.getCategoryTree();
   }
 
+  @Get('size-guides')
+  @ApiOperation({ summary: 'Every published size guide, by category' })
+  listSizeGuides() {
+    return this.catalog.listSizeGuides();
+  }
+
   @Get('collections')
   @ApiOperation({ summary: 'Active merchandising collections' })
   listCollections() {

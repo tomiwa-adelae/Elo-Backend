@@ -4,7 +4,9 @@ import {
   IsEnum,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
+  ValidateIf,
   MinLength,
   ValidateNested,
 } from 'class-validator';
@@ -35,15 +37,22 @@ export class ShippingAddressDto {
   @MaxLength(80)
   city: string;
 
+  // Required in Nigeria, where delivery is priced by state. Abroad it is the
+  // region/province/county and may legitimately be blank.
+  @ValidateIf((o: ShippingAddressDto) => (o.countryCode ?? 'NG') === 'NG')
   @IsString()
-  @MinLength(2)
+  @MinLength(2, { message: 'Please choose a state' })
   @MaxLength(80)
-  state: string;
+  state: string = '';
 
   @IsOptional()
   @IsString()
   @MaxLength(80)
   country?: string = 'Nigeria';
+
+  @IsOptional()
+  @Matches(/^[A-Z]{2}$/, { message: 'Country must be a 2-letter code' })
+  countryCode?: string = 'NG';
 
   @IsOptional()
   @IsString()
